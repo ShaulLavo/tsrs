@@ -5,10 +5,11 @@
     "": {
       "name": "tsrs-lsp-wasi",
       "devDependencies": {
-        "@singapore-editor/lsp": "0.2.11",
-        "@singapore-editor/lsp-plugin": "0.2.14",
+        "@singapore-editor/core": "0.2.13",
+        "@singapore-editor/lsp": "0.2.12",
+        "@singapore-editor/lsp-plugin": "0.2.15",
         "@types/bun": "1.4.5",
-        "@waffle-os/runtime": "0.0.148",
+        "@waffle-os/runtime": "0.0.149",
         "playwright-core": "1.64.1",
         "typescript": "7.0.2",
       },
@@ -38,9 +39,9 @@
 
     "@singapore-editor/core": ["@singapore-editor/core@0.2.13", "", { "dependencies": { "@shaulavo/hotkeys": "^0.0.4", "@shikijs/engine-oniguruma": "4.4.3", "@singapore-editor/textbuffer": "0.2.9", "diff": "^9.0.0", "evlog": "^2.29.0", "shiki": "^4.4.3" } }, "sha512-+OR2pa6pFueeOh6MOOXT6p1ZKX9cC4lkpGEPXoJ+IN4J5FjvPGlFVucYSF2+s55XbdzR9TdZL3MSgv+mZfN13g=="],
 
-    "@singapore-editor/lsp": ["@singapore-editor/lsp@0.2.11", "", { "dependencies": { "vscode-languageserver-protocol": "^3.18.4" } }, "sha512-5ILQ5Jm7h+0SHgwJ1L+U9ZD5XMU/o8abFN0IjGb+gq0IQt3la45jbiiv5u/C8PoLV72OkOvOKq4PZsLbd1WTHA=="],
+    "@singapore-editor/lsp": ["@singapore-editor/lsp@0.2.12", "", { "dependencies": { "vscode-languageserver-protocol": "^3.18.4" } }, "sha512-VrqBjOt+o/pjixeVFrxZkk8NA1hLfwjYGVzsFrXpBh5tXW8gG5WcIAEz62V/fA/HGgACuO1qe7R1CepwwcG5hA=="],
 
-    "@singapore-editor/lsp-plugin": ["@singapore-editor/lsp-plugin@0.2.14", "", { "dependencies": { "@singapore-editor/lsp": "0.2.11", "@singapore-editor/plugin-ui": "0.2.13", "vscode-languageserver-protocol": "^3.18.4" }, "peerDependencies": { "@singapore-editor/core": "0.2.13" } }, "sha512-Bl1o7+Bq8jJ3NxTl3SUlXhZgqTlsGKPurPEnHMe6Pr5Y58N5FKBXXyi07mNe3D4IrKtV0wIB/6rBZHSh8FhUww=="],
+    "@singapore-editor/lsp-plugin": ["@singapore-editor/lsp-plugin@0.2.15", "", { "dependencies": { "@singapore-editor/lsp": "0.2.12", "@singapore-editor/plugin-ui": "0.2.13", "vscode-languageserver-protocol": "^3.18.4" }, "peerDependencies": { "@singapore-editor/core": "0.2.13" } }, "sha512-t3qSFAGN0Oq7K88ex7oFJMl3yBie3RNQWZRU9gLjMlTvahQ9KnH8Qdkgpne/FxmauXSoAJmIsON1VU76n3xK2Q=="],
 
     "@singapore-editor/plugin-ui": ["@singapore-editor/plugin-ui@0.2.13", "", { "dependencies": { "remark-gfm": "^4.0.1", "remark-parse": "^11.0.0", "remark-stringify": "^11.0.0", "unified": "^11.0.5" }, "peerDependencies": { "@singapore-editor/core": "0.2.13" } }, "sha512-4LjdKS3K6n2zDIW28/E1fmQ1UqyjNSCl60etPIaZZl28llCVzdv1i7M58lVjAcI3ivZLg7nYt0skyCZii3H6jg=="],
 
@@ -104,7 +105,7 @@
 
     "@ungap/structured-clone": ["@ungap/structured-clone@1.4.0", "", {}, "sha512-1mEZtMKPM09vDmQt5y7YvmN2+DFTP7Tg0EWXdic8/C6VRnpb33e4ghisCIE3WZjsE2N8mf+QV1Zqh7ZFYLWInQ=="],
 
-    "@waffle-os/runtime": ["@waffle-os/runtime@0.0.148", "", {}, "sha512-A2q1yx0UKINuj8T2JedXR1WDgagsPJBPw8nOzrNkgDUhs8h1jN5I7LYjiF4Anz15Zp6Okpxuc2szUDFBP1R4gQ=="],
+    "@waffle-os/runtime": ["@waffle-os/runtime@0.0.149", "", {}, "sha512-xgd+cgrnL1EDPwWlnj9s9r0HYfUuYpoz1Uf+KFp7EeKYQg2PM9HMUw7qdTtvIKpso2G5ay4d3FEl6RjHLhicdg=="],
 
     "bail": ["bail@2.0.2", "", {}, "sha512-0xO6mYd7JB2YesxDKplafRpsiOzPt9V02ddPCLbY1xYGPOX24NTyN50qnUxgCPcSoYMhKpAuBTjQoRZCAkUDRw=="],
 
