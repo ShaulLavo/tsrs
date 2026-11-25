@@ -1,4 +1,5 @@
 mod dynamic_queue_test;
+mod isolated;
 mod lsptestutil;
 mod lspwatcher_test;
 mod progress_test;
@@ -9,6 +10,7 @@ mod server_flakydiagnostics_test;
 mod server_progress_test;
 mod server_projectinfo_test;
 mod server_test;
+mod single_threaded_test;
 mod stack_sanitizer_test;
 mod workerpool_test;
 

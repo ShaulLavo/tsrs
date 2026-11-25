@@ -69,6 +69,10 @@ fn worker_pool() -> &'static WorkerPool {
 
 // Go `go f()` for work that is not tracked by a Queue (timer callbacks): runs `f` on the shared workers.
 pub(crate) fn go(f: impl FnOnce() + Send + 'static) {
+    if tsrs_core::inline_tasks::enabled() {
+        tsrs_core::inline_tasks::defer(f);
+        return;
+    }
     let pool = worker_pool();
     pool.tasks.lock().unwrap().push_back(Box::new(f));
     pool.available.notify_one();
@@ -109,6 +113,10 @@ impl Queue {
             f(&ctx);
             drop(done);
         });
+        if tsrs_core::inline_tasks::enabled() {
+            tsrs_core::inline_tasks::defer(task);
+            return;
+        }
         let pool = worker_pool();
         pool.tasks.lock().unwrap().push_back(task);
         pool.available.notify_one();
@@ -118,6 +126,16 @@ impl Queue {
     // Wait waits for all active tasks to complete.
     // It does not prevent new tasks from being enqueued while waiting.
     pub fn wait(&self) {
+        if tsrs_core::inline_tasks::enabled() {
+            // The queued tasks are this thread's to run (deferred work from other queues runs too).
+            while *self.pending.count.lock().unwrap() > 0 {
+                assert!(
+                    tsrs_core::inline_tasks::run_all() > 0,
+                    "background queue has pending tasks that were never deferred"
+                );
+            }
+            return;
+        }
         // Waits for background workers, without holding a run slot (`tsrs_core::runslots`).
         tsrs_core::runslots::blocking(|| {
             let mut count = self.pending.count.lock().unwrap();

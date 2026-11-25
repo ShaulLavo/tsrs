@@ -665,7 +665,7 @@ impl Session {
             let _cancel = CancelOnDrop(cancel);
             if !delay.is_zero() {
                 // Wait out the debounce window; a newer event cancels this one.
-                if ctx.wait_timeout(delay) {
+                if debounce(ctx, delay) {
                     // Context was cancelled, newer events arrived
                     return;
                 }
@@ -730,7 +730,7 @@ impl Session {
         self.background_queue.enqueue(&debounce_ctx, move |ctx| {
             let _cancel = CancelOnDrop(cancel);
             // Sleep for the debounce delay
-            if ctx.wait_timeout(s.options.debounce_delay) {
+            if debounce(ctx, s.options.debounce_delay) {
                 // Context was cancelled, newer events arrived or another snapshot update ran
                 return;
             }
@@ -2580,4 +2580,14 @@ fn tsrs_overlays(fs: &OverlayFS) -> OverlayMap {
 pub struct ProjectLookupCache {
     snapshot_id: Option<u64>,
     projects: FxHashMap<lsproto::DocumentUri, Vec<Arc<dyn tsrs_ls::Project>>>,
+}
+
+// Waits out a debounce window; true when the context was canceled (a newer event). Single-threaded
+// (`tsrs_core::inline_tasks::enabled`) there is no window: the task already runs between messages, after the events
+// it would coalesce, and sleeping would stall the only thread.
+fn debounce(ctx: &Context, delay: Duration) -> bool {
+    if tsrs_core::inline_tasks::enabled() {
+        return ctx.err().is_some();
+    }
+    ctx.wait_timeout(delay)
 }

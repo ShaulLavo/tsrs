@@ -269,14 +269,14 @@ impl Context {
 
     // Go `<-ctx.Done()`: blocks until the context is canceled (forever when `done_is_nil()`).
     pub fn wait(&self) {
-        while !self.wait_timeout(Duration::from_secs(3600)) {}
+        while !self.wait_timeout_or_report_stuck(Duration::from_secs(3600)) {}
     }
 
     // Go `select { case <-ctx.Done(): ...; case <-time.After(timeout): ... }`: true if the context is canceled
     // within `timeout`.
     pub fn wait_timeout(&self, timeout: Duration) -> bool {
         // Sleeps without holding a run slot (`runslots`).
-        crate::runslots::blocking(|| self.wait_timeout_unslotted(timeout))
+        crate::runslots::blocking(|| self.wait_timeout_inline_or_unslotted(timeout))
     }
 
     fn wait_timeout_unslotted(&self, timeout: Duration) -> bool {
@@ -313,6 +313,9 @@ impl Context {
         let Some(state) = nearest_cancel(self) else {
             return AfterFuncStop { state: None, id: 0 };
         };
+        if crate::inline_tasks::enabled() {
+            return after_func_single_threaded(state, Box::new(f));
+        }
         if state.err().is_some() {
             spawn_after_func(Box::new(f));
             return AfterFuncStop { state: None, id: 0 };
@@ -422,4 +425,76 @@ pub fn locale_from_context(ctx: &Context) -> Locale {
 // locale.go `HasLocale`.
 pub fn has_locale(ctx: &Context) -> bool {
     ctx.value::<LocaleKey>().is_some()
+}
+
+// Single-threaded scheduling (`inline_tasks::enabled`). These helpers stay at the end of the file so that adding them
+// moves no panic location in the code above.
+
+impl Context {
+    fn wait_timeout_inline_or_unslotted(&self, timeout: Duration) -> bool {
+        if crate::inline_tasks::enabled() {
+            return self.wait_timeout_single_threaded(timeout);
+        }
+        self.wait_timeout_unslotted(timeout)
+    }
+
+    // Single-threaded: nothing else runs while this thread waits, so the wait itself runs the deferred tasks (a
+    // deferred `after_func` may be what cancels this context), then sleeps until the deadline or the timeout,
+    // whichever is first. It never spins.
+    fn wait_timeout_single_threaded(&self, timeout: Duration) -> bool {
+        let end = Instant::now() + timeout;
+        loop {
+            crate::inline_tasks::run_all();
+            let Some(state) = nearest_cancel(self) else {
+                std::thread::sleep(end.saturating_duration_since(Instant::now()));
+                return false;
+            };
+            if done_single_threaded(state) {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= end {
+                return false;
+            }
+            let until = state.deadline.map_or(end, |deadline| deadline.min(end));
+            std::thread::sleep(until.saturating_duration_since(now));
+        }
+    }
+
+    // `wait`'s step. Single-threaded, a context that is not canceled once the deferred tasks have run and has no
+    // deadline can never end the wait, so that is reported instead of blocking forever.
+    fn wait_timeout_or_report_stuck(&self, timeout: Duration) -> bool {
+        if !crate::inline_tasks::enabled() {
+            return self.wait_timeout(timeout);
+        }
+        crate::inline_tasks::run_all();
+        let can_end =
+            nearest_cancel(self).is_some_and(|s| done_single_threaded(s) || s.deadline.is_some());
+        assert!(
+            can_end,
+            "Context::wait would never return: single-threaded, nothing else can cancel this context"
+        );
+        self.wait_timeout(timeout)
+    }
+}
+
+// Single-threaded `after_func`: no thread can be started when the context is canceled, so `inline_tasks` runs the
+// callback on its next pass after the cancellation (at once if the context is already done). A context dropped
+// without being canceled drops the callback, as Go never runs it. The returned stop does nothing. `cancel` itself is
+// untouched, so callbacks registered by threaded code keep their own threads.
+fn after_func_single_threaded(state: &Arc<CancelState>, f: AfterFunc) -> AfterFuncStop {
+    let state = Arc::downgrade(state);
+    crate::inline_tasks::defer_when(
+        move || state.upgrade().map(|state| done_single_threaded(&state)),
+        f,
+    );
+    AfterFuncStop { state: None, id: 0 }
+}
+
+// Whether the context is canceled or past its deadline (`ContextError` comes from `err` when the owner asks). It
+// reads the flag and the deadline directly: calling `CancelState::err` from the single-threaded helpers would
+// reorder the functions of builds that never enable the mode (the `tsrs_wasm` module).
+fn done_single_threaded(state: &CancelState) -> bool {
+    state.canceled.load(Ordering::Acquire)
+        || state.deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }

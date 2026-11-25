@@ -15,12 +15,14 @@ const ERR_NO_CONTENT_LENGTH: &str = "jsonrpc: no content length";
 // Reader reads JSON-RPC messages with Content-Length framing.
 pub struct Reader<R: Read> {
     r: BufReader<R>,
+    // tsrs-only: the frame `read_before` has read so far.
+    partial: PartialFrame,
 }
 
 // baseproto.go:27
 // NewReader creates a new Reader.
 pub(crate) fn new_reader<R: Read>(r: R) -> Reader<R> {
-    Reader { r: BufReader::with_capacity(4096, r) }
+    Reader { r: BufReader::with_capacity(4096, r), partial: PartialFrame::default() }
 }
 
 fn io_error(err: &std::io::Error) -> Error {
@@ -56,6 +58,42 @@ fn trim_space(mut s: &[u8]) -> &[u8] {
     s
 }
 
+// One header line of `read`, with its line ending: true for the blank line that ends the headers. A
+// `Content-Length` header sets `content_length`.
+fn header_line(line: &[u8], content_length: &mut i64) -> Result<bool, Error> {
+    if line == b"\r\n" {
+        return Ok(true);
+    }
+
+    let Some(colon) = line.iter().position(|&b| b == b':') else {
+        return Err(Error::tagged(
+            ErrorTag::InvalidHeader,
+            format!("{}: {}", ERR_INVALID_HEADER, go_quote(line)),
+        ));
+    };
+    let (key, value) = (&line[..colon], &line[colon + 1..]);
+
+    if key == b"Content-Length" {
+        let value = tsrs_core::utf8::from_utf8_lossy(trim_space(value)).into_owned();
+        *content_length = match parse_int(&value) {
+            Ok(n) => n,
+            Err(err) => {
+                return Err(Error::tagged(
+                    ErrorTag::InvalidContentLength,
+                    format!("{ERR_INVALID_CONTENT_LENGTH}: parse error: {err}"),
+                ));
+            }
+        };
+        if *content_length < 0 {
+            return Err(Error::tagged(
+                ErrorTag::InvalidContentLength,
+                format!("{ERR_INVALID_CONTENT_LENGTH}: negative value {content_length}"),
+            ));
+        }
+    }
+    Ok(false)
+}
+
 impl<R: Read> Reader<R> {
     // baseproto.go:34
     // Read reads the next message payload.
@@ -70,35 +108,8 @@ impl<R: Read> Reader<R> {
                 Err(err) => return Err(Error::wrap("jsonrpc: read header: ", io_error(&err))),
             }
 
-            if line == b"\r\n" {
+            if header_line(&line, &mut content_length)? {
                 break;
-            }
-
-            let Some(colon) = line.iter().position(|&b| b == b':') else {
-                return Err(Error::tagged(
-                    ErrorTag::InvalidHeader,
-                    format!("{}: {}", ERR_INVALID_HEADER, go_quote(&line)),
-                ));
-            };
-            let (key, value) = (&line[..colon], &line[colon + 1..]);
-
-            if key == b"Content-Length" {
-                let value = tsrs_core::utf8::from_utf8_lossy(trim_space(value)).into_owned();
-                content_length = match parse_int(&value) {
-                    Ok(n) => n,
-                    Err(err) => {
-                        return Err(Error::tagged(
-                            ErrorTag::InvalidContentLength,
-                            format!("{ERR_INVALID_CONTENT_LENGTH}: parse error: {err}"),
-                        ));
-                    }
-                };
-                if content_length < 0 {
-                    return Err(Error::tagged(
-                        ErrorTag::InvalidContentLength,
-                        format!("{ERR_INVALID_CONTENT_LENGTH}: negative value {content_length}"),
-                    ));
-                }
             }
         }
 
@@ -148,5 +159,94 @@ impl<W: Write> Writer<W> {
         write!(self.w, "Content-Length: {}\r\n\r\n", data.len()).map_err(|err| io_error(&err))?;
         self.w.write_all(data).map_err(|err| io_error(&err))?;
         self.w.flush().map_err(|err| io_error(&err))
+    }
+}
+
+// tsrs-only: a frame `read_before` has started. `body` is Some once the headers are complete.
+#[derive(Default)]
+struct PartialFrame {
+    line: Vec<u8>,
+    content_length: i64,
+    body: Option<Vec<u8>>,
+}
+
+impl<R: Read> Reader<R> {
+    /// tsrs-only: `read` that never waits for the source past a deadline, for a single-threaded caller.
+    ///
+    /// Before each read from the source that would have to wait (nothing buffered), it calls `wait`, which returns
+    /// whether input (or the end of input) is there. When `wait` returns false it returns None and keeps what it has
+    /// read of the frame; a later call continues that frame. Otherwise it returns what `read` would: the payload or
+    /// the same error. Do not mix it with `read` while a frame is partly read.
+    pub fn read_before(
+        &mut self,
+        wait: &mut dyn FnMut() -> bool,
+    ) -> Option<Result<Vec<u8>, Error>> {
+        loop {
+            if self.r.buffer().is_empty() && !wait() {
+                return None;
+            }
+            if let Some(result) = self.read_buffered() {
+                self.partial = PartialFrame::default();
+                return Some(result);
+            }
+        }
+    }
+
+    // Moves buffered bytes (reading the source once if nothing is buffered) into the partial frame. Some when the
+    // frame is complete or failed.
+    fn read_buffered(&mut self) -> Option<Result<Vec<u8>, Error>> {
+        let in_body = self.partial.body.is_some();
+        let context = if in_body { "jsonrpc: read content: " } else { "jsonrpc: read header: " };
+        let buf = match self.r.fill_buf() {
+            Ok(buf) => buf,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => return None,
+            Err(err) => return Some(Err(Error::wrap(context, io_error(&err)))),
+        };
+        if buf.is_empty() {
+            return Some(Err(self.partial.end_of_input()));
+        }
+        let Some(body) = &mut self.partial.body else {
+            let newline = buf.iter().position(|&b| b == b'\n');
+            let (taken, line_done) = newline.map_or((buf.len(), false), |i| (i + 1, true));
+            self.partial.line.extend_from_slice(&buf[..taken]);
+            self.r.consume(taken);
+            return if line_done { self.partial.header_done() } else { None };
+        };
+        let want = usize::try_from(self.partial.content_length).unwrap_or(0) - body.len();
+        let taken = want.min(buf.len());
+        body.extend_from_slice(&buf[..taken]);
+        self.r.consume(taken);
+        (taken == want).then(|| Ok(std::mem::take(body)))
+    }
+}
+
+impl PartialFrame {
+    // A header line is complete (`read`'s header loop). Some for a failure; the blank line starts the body.
+    fn header_done(&mut self) -> Option<Result<Vec<u8>, Error>> {
+        let line = std::mem::take(&mut self.line);
+        match header_line(&line, &mut self.content_length) {
+            Err(err) => Some(Err(err)),
+            Ok(false) => None,
+            Ok(true) if self.content_length <= 0 => {
+                Some(Err(Error::tagged(ErrorTag::NoContentLength, ERR_NO_CONTENT_LENGTH)))
+            }
+            Ok(true) => {
+                self.body = Some(Vec::with_capacity(self.content_length as usize));
+                None
+            }
+        }
+    }
+
+    // The source ended: `read`'s EOF (headers) or io.ReadFull's EOF / unexpected EOF (body).
+    fn end_of_input(&self) -> Error {
+        let Some(body) = &self.body else {
+            return Error::tagged(ErrorTag::EOF, "EOF");
+        };
+        let err = if body.is_empty() {
+            Error::tagged(ErrorTag::EOF, "EOF")
+        } else {
+            Error::tagged(ErrorTag::UnexpectedEOF, "unexpected EOF")
+        };
+        Error::wrap("jsonrpc: read content: ", err)
     }
 }

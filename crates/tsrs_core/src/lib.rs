@@ -33,6 +33,7 @@ pub mod festats;
 pub mod glob;
 pub mod gocompat;
 pub mod goslices;
+pub mod inline_tasks;
 pub mod jsnum;
 pub mod json;
 pub mod lazymembers;

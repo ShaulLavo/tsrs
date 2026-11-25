@@ -21,6 +21,7 @@ mod glob {
 }
 mod gocompat_test;
 mod goslices_test;
+mod inline_tasks_test;
 mod isolated;
 mod jsnum {
     mod big_test;

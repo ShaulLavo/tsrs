@@ -150,6 +150,10 @@ pub fn new_project_loading_progress_from_reporter(
         }),
         delay,
     });
+    if tsrs_core::inline_tasks::enabled() {
+        // No runner: events are dropped (`send_event`) and no progress UI is shown.
+        return p;
+    }
     let runner = Arc::clone(&p);
     std::thread::Builder::new()
         .name("lsp-progress".to_string())
@@ -160,6 +164,9 @@ pub fn new_project_loading_progress_from_reporter(
 
 impl ProjectLoadingProgress {
     fn send_event(&self, ev: ProgressEvent) {
+        if tsrs_core::inline_tasks::enabled() {
+            return;
+        }
         let done = self.reporter.done();
         let ch = Arc::clone(&self.ch);
         let guard = self.ch.state.lock().unwrap();
