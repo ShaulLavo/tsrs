@@ -160,6 +160,10 @@ structure with OS threads:
   timers) runs on a separate fixed pool of 6 background threads with 512 MB stacks (`tsrs_project::background`);
   Go's `time.AfterFunc` -> one timer thread with a deadline heap that dispatches the callbacks onto those workers.
 
+On targets without threads (`tsrs_core::INLINE_TASKS`, the `wasm32-wasip1` build in `crates/tsrs_lsp_wasi`), the same
+server runs on one thread: the loop reads and dispatches one message at a time and runs deferred async work,
+background tasks and due timers between messages ([notes/wasi-lsp.md](../notes/wasi-lsp.md)).
+
 Shared data obeys the existing threading contract (PORTING.md "Threading"): source files are parsed and bound by one
 thread and then read-only; programs are immutable after construction (Go's `Program` is too); a checker is used by
 one thread at a time (the pool hands it out under a lock, Go's `heldBy`), and everything it allocates is
