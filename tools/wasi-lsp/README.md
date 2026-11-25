@@ -8,11 +8,17 @@ tsrs's language server as one single-threaded `wasm32-wasip1` command (`crates/t
 ```sh
 cd tools/wasi-lsp
 bun install --frozen-lockfile
-WASM_OPT=/path/to/binaryen-133/wasm-opt bun run build   # dist/tsrs-lsp.wasm
+WASM_OPT=/path/to/binaryen-133/wasm-opt bun run build   # dist/tsrs-lsp.wasm and .sha256
 bun run test:browser                                    # headless Chromium, Playwright 1.64.1
+bun run test:editor                                     # a Singapore editor against the server
 ```
 
+Built modules are attached to this fork's `wasi-lsp-v*` releases.
+
 ## Use
+
+Register the module at an absolute path (here with the package's `tsrsLsp`, or your own `defineProgramPackage` entry
+pointing at a downloaded `tsrs-lsp.wasm`), then start it:
 
 ```ts
 import { startCommand } from "@waffle-os/runtime/command";

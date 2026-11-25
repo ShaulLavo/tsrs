@@ -4,8 +4,7 @@
   "type": "module",
   "description": "tsrs's language server as a Waffle program (wasm32-wasip1), with its build and browser test",
   "exports": {
-    ".": "./src/program.ts",
-    "./stdio-transport": "./src/stdio-transport.ts"
+    ".": "./src/program.ts"
   },
   "scripts": {
     "build": "node build.ts --out dist/tsrs-lsp.wasm",
