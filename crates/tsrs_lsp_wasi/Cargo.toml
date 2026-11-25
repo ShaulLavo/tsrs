@@ -1,0 +1,21 @@
+[package]
+name = "tsrs_lsp_wasi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "tsrs's language server as a single-threaded wasm32-wasip1 command (stdio only)"
+
+[lints]
+workspace = true
+
+[dependencies]
+tsrs_core.workspace = true
+tsrs_vfs.workspace = true
+tsrs_lsp.workspace = true
+
+[[bin]]
+name = "tsrs-lsp"
+path = "src/main.rs"
+test = false

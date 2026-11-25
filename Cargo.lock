@@ -1362,6 +1362,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsrs_lsp_wasi"
+version = "0.25.0"
+dependencies = [
+ "tsrs_core",
+ "tsrs_lsp",
+ "tsrs_vfs",
+]
+
+[[package]]
 name = "tsrs_lsproto"
 version = "7.1.0-beta.tsrs5"
 dependencies = [

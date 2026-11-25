@@ -448,6 +448,8 @@ crates/tsrs_ls/src/format/rulecontext.rs	is_option_disabled_or_undefined_or_toke
 crates/tsrs_ls/src/format/rulecontext.rs	is_option_enabled	leak	ownership		safe-api-possible	owned by ordinary Rust ownership in Boshen's #638
 crates/tsrs_ls/src/format/rulecontext.rs	is_option_enabled_or_undefined	leak	ownership		safe-api-possible	owned by ordinary Rust ownership in Boshen's #638
 crates/tsrs_ls/src/format/rulecontext.rs	option_equals	leak	ownership		safe-api-possible	owned by ordinary Rust ownership in Boshen's #638
+crates/tsrs_lsp_wasi/src/poll.rs	(file)	extern	boundary		keep	WASI poll_oneoff import
+crates/tsrs_lsp_wasi/src/poll.rs	stdin_ready	block	boundary	`subscriptions` holds `subscriptions.len()` initialized witx `subscription` records and `events` has room	keep	WASI poll_oneoff call with plain-data records
 crates/tsrs_lsproto/src/lsp.rs	intern	leak	ownership		safe-api-possible	owned by ordinary Rust ownership in Boshen's #638
 crates/tsrs_parser/src/parser_1.rs	missing_list_nodes	block	logic	a zero-length slice needs only a non-null pointer aligned for `P<Node>`; a `usize`	keep	dangling non-null pointer for an empty slice
 crates/tsrs_printer/src/emitcontext.rs	EmitContext::new_node_visitor	block	logic	an EmitContext is only created by `new_emit_context_in` (`new_emit_context` /	keep	self-referential writer borrow inside one call; scoped
