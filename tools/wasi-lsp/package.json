@@ -1,0 +1,26 @@
+{
+  "name": "tsrs-lsp-wasi",
+  "private": true,
+  "type": "module",
+  "description": "tsrs's language server as a Waffle program (wasm32-wasip1), with its build and browser test",
+  "exports": {
+    ".": "./src/program.ts",
+    "./stdio-transport": "./src/stdio-transport.ts"
+  },
+  "scripts": {
+    "build": "node build.ts --out dist/tsrs-lsp.wasm",
+    "test:browser": "bun test/browser.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "peerDependencies": {
+    "@waffle-os/runtime": "*"
+  },
+  "devDependencies": {
+    "@singapore-editor/lsp": "0.2.11",
+    "@singapore-editor/lsp-plugin": "0.2.14",
+    "@types/bun": "1.4.5",
+    "@waffle-os/runtime": "0.0.148",
+    "playwright-core": "1.64.1",
+    "typescript": "7.0.2"
+  }
+}
