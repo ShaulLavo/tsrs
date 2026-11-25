@@ -41,6 +41,11 @@ fn get_pool() -> &'static WorkerPool {
 
 // Go `go f()` for request work.
 pub fn go(f: impl FnOnce() + Send + 'static) {
+    if tsrs_core::INLINE_TASKS {
+        // The single-threaded server loop runs it before reading the next message.
+        tsrs_core::inline_tasks::defer(move || run_or_exit(f));
+        return;
+    }
     let pool = get_pool();
     let mut state = pool.state.lock().unwrap();
     state.jobs.push_back(Box::new(f));

@@ -16,7 +16,8 @@ description = "TypeScript language server for tsrs"
 workspace = true
 
 [dependencies]
-tsrs_core.workspace = true
+# inline-tasks: on NO_THREADS targets the server runs deferred work on its single-threaded loop.
+tsrs_core = { workspace = true, features = ["inline-tasks"] }
 tsrs_diagnostics.workspace = true
 tsrs_vfs.workspace = true
 tsrs_compiler.workspace = true

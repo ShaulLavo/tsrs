@@ -23,6 +23,9 @@ plain-ptrs = []
 # The shared type graph (src/sharedgraph.rs, on with TSRS_SHARED_GRAPH=1). Without it every frozen-object test is a
 # constant false and its read and write paths fold away.
 shared-graph = []
+# On NO_THREADS targets, defer work that would start a thread to `inline_tasks`, for a caller that runs that queue
+# (the language server's single-threaded loop; tsrs_lsp enables it). Without it NO_THREADS builds are unchanged.
+inline-tasks = []
 
 [dependencies]
 rustc-hash.workspace = true

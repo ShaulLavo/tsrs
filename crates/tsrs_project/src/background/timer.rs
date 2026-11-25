@@ -42,6 +42,10 @@ fn timer_thread() -> &'static TimerThread {
             }),
             wake: Condvar::new(),
         }));
+        if tsrs_core::INLINE_TASKS {
+            // `fire_due_timers` stands in for the thread.
+            return t;
+        }
         std::thread::Builder::new()
             .name("project-timers".to_string())
             .spawn(move || {
@@ -71,6 +75,25 @@ fn timer_thread() -> &'static TimerThread {
             .expect("failed to spawn timer thread");
         t
     })
+}
+
+/// `INLINE_TASKS`: defers the callbacks of every timer whose deadline has passed (`tsrs_core::inline_tasks`) and
+/// returns the next pending deadline, for the single-threaded server loop that drives the timers.
+pub fn fire_due_timers() -> Option<Instant> {
+    let t = timer_thread();
+    let mut st = t.st.lock().unwrap();
+    let now = Instant::now();
+    while let Some(Reverse((deadline, id, generation))) = st.heap.peek().copied() {
+        let current = matches!(st.pending.get(&id), Some((g, _)) if *g == generation);
+        if current && deadline > now {
+            return Some(deadline);
+        }
+        st.heap.pop();
+        if current && let Some((_, f)) = st.pending.remove(&id) {
+            go(move || f());
+        }
+    }
+    None
 }
 
 // Go `*time.Timer` created by `time.AfterFunc`.

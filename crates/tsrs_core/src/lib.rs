@@ -13,6 +13,13 @@ pub const COMPRESSED_PTRS: bool = cfg!(compressed_ptrs);
 /// and `tsc -b`, and `tsc -b` builds and reports on the calling thread. False on native targets, where the
 /// branches it guards fold away.
 pub const NO_THREADS: bool = cfg!(all(target_family = "wasm", not(target_feature = "atomics")));
+/// `NO_THREADS` with the `inline-tasks` feature.
+///
+/// Work that would start a thread (context `after_func` callbacks, the language server's workers, background tasks
+/// and timers) is deferred to `inline_tasks`, and the caller runs that queue. Other builds, `tsrs_wasm` included, are
+/// unaffected.
+pub const INLINE_TASKS: bool = NO_THREADS && cfg!(feature = "inline-tasks");
+pub mod inline_tasks;
 pub(crate) use ptr::alloc_slice_aligned4;
 pub use ptr::{
     ArenaStringBuilder, OptionSliceCell, OptionThinSliceCell, P, PACK_BITS, PKey, PSliceCell,

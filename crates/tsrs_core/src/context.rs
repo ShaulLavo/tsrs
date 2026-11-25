@@ -111,7 +111,7 @@ impl CancelState {
             }
         }
         for (_, f) in after {
-            spawn_after_func(f);
+            run_after_func(f);
         }
     }
 }
@@ -276,7 +276,7 @@ impl Context {
     // within `timeout`.
     pub fn wait_timeout(&self, timeout: Duration) -> bool {
         // Sleeps without holding a run slot (`runslots`).
-        crate::runslots::blocking(|| self.wait_timeout_unslotted(timeout))
+        crate::runslots::blocking(|| self.wait_timeout_inline_or_unslotted(timeout))
     }
 
     fn wait_timeout_unslotted(&self, timeout: Duration) -> bool {
@@ -314,13 +314,13 @@ impl Context {
             return AfterFuncStop { state: None, id: 0 };
         };
         if state.err().is_some() {
-            spawn_after_func(Box::new(f));
+            run_after_func(Box::new(f));
             return AfterFuncStop { state: None, id: 0 };
         }
         let mut inner = state.inner.lock().unwrap();
         if inner.err.is_some() {
             drop(inner);
-            spawn_after_func(Box::new(f));
+            run_after_func(Box::new(f));
             return AfterFuncStop { state: None, id: 0 };
         }
         let id = inner.next_after_id;
@@ -422,4 +422,45 @@ pub fn locale_from_context(ctx: &Context) -> Locale {
 // locale.go `HasLocale`.
 pub fn has_locale(ctx: &Context) -> bool {
     ctx.value::<LocaleKey>().is_some()
+}
+
+// The `INLINE_TASKS` helpers stay at the end of the file, so that adding them moves no panic location in builds
+// without `INLINE_TASKS` (the `tsrs_wasm` module stays byte-identical).
+
+impl Context {
+    fn wait_timeout_inline_or_unslotted(&self, timeout: Duration) -> bool {
+        if crate::INLINE_TASKS {
+            return self.wait_timeout_single_threaded(timeout);
+        }
+        self.wait_timeout_unslotted(timeout)
+    }
+
+    // `INLINE_TASKS`: no other thread can cancel the context while this one waits, so only its deadline can end the
+    // wait early. A debounce (the session's snapshot and diagnostics delays) therefore ends at once instead of
+    // stalling the only thread; the work it would coalesce runs between messages anyway.
+    fn wait_timeout_single_threaded(&self, timeout: Duration) -> bool {
+        let Some(state) = nearest_cancel(self) else {
+            return false;
+        };
+        if state.err().is_some() {
+            return true;
+        }
+        match state.deadline {
+            Some(deadline) if deadline <= Instant::now() + timeout => {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                state.cancel(ContextError::DeadlineExceeded, None);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+// Runs an `after_func` callback: on its own thread, or with `INLINE_TASKS` deferred to `inline_tasks`.
+fn run_after_func(f: AfterFunc) {
+    if crate::INLINE_TASKS {
+        crate::inline_tasks::defer(f);
+        return;
+    }
+    spawn_after_func(f);
 }

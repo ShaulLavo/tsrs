@@ -81,6 +81,7 @@ pub fn new_server(opts: ServerOptions) -> Arc<Server> {
         init_started: AtomicBool::new(false),
         client_seq: AtomicU64::new(0),
         request_queue: new_dynamic_queue(),
+        deferred_requests: Mutex::new(std::collections::VecDeque::new()),
         outgoing_queue: new_dynamic_queue(),
         pending_client_requests: Mutex::new(FxHashMap::default()),
         pending_server_requests: Mutex::new(FxHashMap::default()),
@@ -240,6 +241,8 @@ pub struct Server {
     pub init_started: AtomicBool,
     client_seq: AtomicU64,
     request_queue: DynamicQueue<Arc<RequestMessage>>,
+    // `INLINE_TASKS`: requests read while a handler waited for a client response, dispatched next.
+    deferred_requests: Mutex<std::collections::VecDeque<Arc<RequestMessage>>>,
     pub(crate) outgoing_queue: DynamicQueue<Message>,
     pending_client_requests: Mutex<FxHashMap<ID, PendingClientRequest>>,
     pending_server_requests: Mutex<FxHashMap<ID, ResponseChan>>,
@@ -387,6 +390,12 @@ impl ResponseChan {
     fn close(&self) {
         self.inner.0.lock().unwrap().closed = true;
         self.inner.1.notify_all();
+    }
+
+    // Whether `recv` would return without waiting.
+    fn ready(&self) -> bool {
+        let state = self.inner.0.lock().unwrap();
+        state.value.is_some() || state.closed
     }
 
     // `select { case <-ctx.Done(): ...; case resp := <-responseChan: ... }`; Ok(None) is a receive from the
@@ -1326,6 +1335,9 @@ impl Server {
 
     // server.go:859
     pub fn run(self: &Arc<Self>, ctx: &Context) -> Result<(), Error> {
+        if tsrs_core::INLINE_TASKS {
+            return self.run_single_threaded(ctx);
+        }
         let (g, ctx) = ErrGroup::with_context(ctx);
         let _ = self.background_ctx.set(ctx.clone());
         {
@@ -1371,59 +1383,165 @@ impl Server {
                 return Err(err.into());
             }
             let (msg, err) = reader.read();
+            if let Some(req) = self.route_incoming(ctx, msg, err)? {
+                self.request_queue.put(ctx, req)?;
+            }
+        }
+    }
+
+    // The read loop's handling of one read: errors, `initialize`, responses to server->client requests and
+    // `$/cancelRequest` are handled here; any other request or notification is returned for dispatch.
+    fn route_incoming(
+        self: &Arc<Self>,
+        ctx: &Context,
+        msg: Option<Message>,
+        err: Option<Error>,
+    ) -> Result<Option<Arc<RequestMessage>>, Error> {
+        if let Some(err) = err {
+            if err.is_code(ErrorCode::INVALID_REQUEST) || err.is_code(ErrorCode::INVALID_PARAMS) {
+                let mut id = None;
+                if err.is_code(ErrorCode::INVALID_PARAMS)
+                    && let Some(msg) = &msg
+                    && msg.kind == MessageKind::Request
+                {
+                    id.clone_from(&msg.as_request().id);
+                }
+                self.send_error(id.as_ref(), err)?;
+                return Ok(None);
+            }
+            return Err(err);
+        }
+        let msg = msg.unwrap();
+
+        if self.initialize_params.get().is_none() && msg.kind == MessageKind::Request {
+            let req = msg.into_request();
+            if req.method == Method::INITIALIZE {
+                let params = match req.unmarshal_params::<lsproto::InitializeParams>() {
+                    Ok(params) => params,
+                    Err(err) => {
+                        self.send_error(req.id.as_ref(), err)?;
+                        return Ok(None);
+                    }
+                };
+                let resp = self.handle_initialize(ctx, params, &req)?;
+                self.send_result(req.id.as_ref(), &resp)?;
+            } else {
+                self.send_error(req.id.as_ref(), ErrorCode::SERVER_NOT_INITIALIZED.into())?;
+            }
+            return Ok(None);
+        }
+
+        if msg.kind == MessageKind::Response {
+            let resp = msg.into_response();
+            let mut pending = self.pending_server_requests.lock().unwrap();
+            let id = resp.id.clone().expect("response without id");
+            if let Some(resp_chan) = pending.remove(&id) {
+                resp_chan.send(resp);
+                resp_chan.close();
+            }
+            return Ok(None);
+        }
+        let req = msg.into_request();
+        if req.method == Method::CANCEL_REQUEST {
+            if let Ok(params) = req.unmarshal_params::<lsproto::CancelParams>() {
+                self.cancel_request(&params.id);
+            }
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(req)))
+    }
+
+    // `INLINE_TASKS`:`send_client_request` reads until the client answers. Other responses are routed and
+    // `$/cancelRequest` applies at once; requests and notifications wait in `deferred_requests`, in order. Runs
+    // after `initialize` (server->client requests come from handlers), so nothing here starts the server.
+    fn read_until_response(
+        &self,
+        ctx: &Context,
+        response_chan: &ResponseChan,
+    ) -> Result<(), Error> {
+        while !response_chan.ready() {
+            if let Some(err) = ctx.err() {
+                return Err(err.into());
+            }
+            let mut reader = self.r.lock().unwrap().take().expect("reader in use");
+            let (msg, err) = reader.read();
+            *self.r.lock().unwrap() = Some(reader);
             if let Some(err) = err {
                 if err.is_code(ErrorCode::INVALID_REQUEST) || err.is_code(ErrorCode::INVALID_PARAMS)
                 {
-                    let mut id = None;
-                    if err.is_code(ErrorCode::INVALID_PARAMS)
-                        && let Some(msg) = &msg
-                        && msg.kind == MessageKind::Request
-                    {
-                        id.clone_from(&msg.as_request().id);
-                    }
+                    let id = msg
+                        .as_ref()
+                        .filter(|msg| {
+                            err.is_code(ErrorCode::INVALID_PARAMS)
+                                && msg.kind == MessageKind::Request
+                        })
+                        .and_then(|msg| msg.as_request().id.clone());
                     self.send_error(id.as_ref(), err)?;
                     continue;
                 }
                 return Err(err);
             }
             let msg = msg.unwrap();
-
-            if self.initialize_params.get().is_none() && msg.kind == MessageKind::Request {
-                let req = msg.into_request();
-                if req.method == Method::INITIALIZE {
-                    let params = match req.unmarshal_params::<lsproto::InitializeParams>() {
-                        Ok(params) => params,
-                        Err(err) => {
-                            self.send_error(req.id.as_ref(), err)?;
-                            continue;
-                        }
-                    };
-                    let resp = self.handle_initialize(ctx, params, &req)?;
-                    self.send_result(req.id.as_ref(), &resp)?;
-                } else {
-                    self.send_error(req.id.as_ref(), ErrorCode::SERVER_NOT_INITIALIZED.into())?;
-                }
-                continue;
-            }
-
             if msg.kind == MessageKind::Response {
                 let resp = msg.into_response();
-                let mut pending = self.pending_server_requests.lock().unwrap();
                 let id = resp.id.clone().expect("response without id");
-                if let Some(resp_chan) = pending.remove(&id) {
+                let resp_chan = self.pending_server_requests.lock().unwrap().remove(&id);
+                if let Some(resp_chan) = resp_chan {
                     resp_chan.send(resp);
                     resp_chan.close();
                 }
-            } else {
-                let req = msg.into_request();
-                if req.method == Method::CANCEL_REQUEST {
-                    if let Ok(params) = req.unmarshal_params::<lsproto::CancelParams>() {
-                        self.cancel_request(&params.id);
-                    }
-                } else {
-                    self.request_queue.put(ctx, Arc::new(req))?;
+                continue;
+            }
+            let req = msg.into_request();
+            if req.method == Method::CANCEL_REQUEST {
+                if let Ok(params) = req.unmarshal_params::<lsproto::CancelParams>() {
+                    self.cancel_request(&params.id);
+                }
+                continue;
+            }
+            self.deferred_requests.lock().unwrap().push_back(Arc::new(req));
+        }
+        Ok(())
+    }
+
+    // `INLINE_TASKS`:reads one message on the calling thread (the reader stays in `self.r` between reads).
+    fn read_one(self: &Arc<Self>, ctx: &Context) -> Result<Option<Arc<RequestMessage>>, Error> {
+        let mut reader = self.r.lock().unwrap().take().expect("reader in use");
+        let (msg, err) = reader.read();
+        *self.r.lock().unwrap() = Some(reader);
+        self.route_incoming(ctx, msg, err)
+    }
+
+    // `INLINE_TASKS`:the read, dispatch and write loops on one thread. Messages are handled one at a time; a
+    // handler's async work, background tasks and due timers run (in that order, FIFO) before the next read.
+    fn run_single_threaded(self: &Arc<Self>, ctx: &Context) -> Result<(), Error> {
+        let _ = self.background_ctx.set(ctx.clone());
+        let (ctx, lsp_exit) = ctx.with_cancel_cause();
+        let _exit_on_return = DeferCall(Some({
+            let lsp_exit = lsp_exit.clone();
+            move || lsp_exit.call(None)
+        }));
+        loop {
+            loop {
+                project::background::fire_due_timers();
+                if tsrs_core::inline_tasks::run_all() == 0 {
+                    break;
                 }
             }
+            if ctx.err().is_some() {
+                return Ok(());
+            }
+            let deferred = self.deferred_requests.lock().unwrap().pop_front();
+            let req = match deferred {
+                Some(req) => req,
+                None => match self.read_one(&ctx) {
+                    Ok(Some(req)) => req,
+                    Ok(None) => continue,
+                    Err(err) if err.is_eof() => return Ok(()),
+                    Err(err) => return Err(err),
+                },
+            };
+            self.dispatch_one(&ctx, &lsp_exit, req);
         }
     }
 
@@ -1445,49 +1563,58 @@ impl Server {
         }));
         loop {
             let req = self.request_queue.get(&ctx)?;
+            self.dispatch_one(&ctx, &lsp_exit, req);
+        }
+    }
 
-            self.last_request_time_ms.store(unix_millis_now(), Ordering::SeqCst);
-            let mut request_ctx = context::with_locale(&ctx, self.get_locale());
-            // tsrs-only: the checkers this message's handler holds keep their data until it is done (`checkerDataLease`).
-            request_ctx = project::with_checker_data_lease(&request_ctx);
-            let mut cancel = None;
-            if let Some(id) = &req.id {
-                let (c, cancel_func) =
-                    context::with_request_id(&request_ctx, &id.string()).with_cancel();
-                request_ctx = c;
-                cancel = Some(cancel_func.clone());
-                self.pending_client_requests
-                    .lock()
-                    .unwrap()
-                    .insert(id.clone(), PendingClientRequest { cancel: cancel_func });
+    // The dispatch loop's handling of one request or notification; async work goes to `workerpool::go`.
+    fn dispatch_one(
+        self: &Arc<Self>,
+        ctx: &Context,
+        lsp_exit: &CancelCauseFunc,
+        req: Arc<RequestMessage>,
+    ) {
+        self.last_request_time_ms.store(unix_millis_now(), Ordering::SeqCst);
+        let mut request_ctx = context::with_locale(ctx, self.get_locale());
+        // tsrs-only: the checkers this message's handler holds keep their data until it is done (`checkerDataLease`).
+        request_ctx = project::with_checker_data_lease(&request_ctx);
+        let mut cancel = None;
+        if let Some(id) = &req.id {
+            let (c, cancel_func) =
+                context::with_request_id(&request_ctx, &id.string()).with_cancel();
+            request_ctx = c;
+            cancel = Some(cancel_func.clone());
+            self.pending_client_requests
+                .lock()
+                .unwrap()
+                .insert(id.clone(), PendingClientRequest { cancel: cancel_func });
+        }
+
+        let lease = project::enter_checker_data_lease(&request_ctx);
+        let result = self.handle_request_or_notification(&request_ctx, &req);
+        drop(lease);
+        match result {
+            Err(err) => {
+                self.handle_error(req.id.as_ref(), err, lsp_exit);
+                self.remove_request(req.id.as_ref(), cancel.as_ref());
             }
-
-            let lease = project::enter_checker_data_lease(&request_ctx);
-            let result = self.handle_request_or_notification(&request_ctx, &req);
-            drop(lease);
-            match result {
-                Err(err) => {
-                    self.handle_error(req.id.as_ref(), err, &lsp_exit);
-                    self.remove_request(req.id.as_ref(), cancel.as_ref());
-                }
-                Ok(Some(do_async_work)) => {
-                    let s = Arc::clone(self);
-                    let lsp_exit = lsp_exit.clone();
-                    let request_ctx = request_ctx.clone();
-                    workerpool::go(move || {
-                        let lease = project::enter_checker_data_lease(&request_ctx);
-                        let result = do_async_work();
-                        drop(lease);
-                        drop(request_ctx);
-                        if let Err(ls_error) = result {
-                            s.handle_error(req.id.as_ref(), ls_error, &lsp_exit);
-                        }
-                        s.remove_request(req.id.as_ref(), cancel.as_ref());
-                    });
-                }
-                Ok(None) => {
-                    self.remove_request(req.id.as_ref(), cancel.as_ref());
-                }
+            Ok(Some(do_async_work)) => {
+                let s = Arc::clone(self);
+                let lsp_exit = lsp_exit.clone();
+                let request_ctx = request_ctx.clone();
+                workerpool::go(move || {
+                    let lease = project::enter_checker_data_lease(&request_ctx);
+                    let result = do_async_work();
+                    drop(lease);
+                    drop(request_ctx);
+                    if let Err(ls_error) = result {
+                        s.handle_error(req.id.as_ref(), ls_error, &lsp_exit);
+                    }
+                    s.remove_request(req.id.as_ref(), cancel.as_ref());
+                });
+            }
+            Ok(None) => {
+                self.remove_request(req.id.as_ref(), cancel.as_ref());
             }
         }
     }
@@ -1519,23 +1646,27 @@ impl Server {
     pub fn write_loop(&self, ctx: &Context) -> Result<(), Error> {
         loop {
             let msg = self.outgoing_queue.get(ctx)?;
-            let result = self.w.lock().unwrap().write(&msg);
-            if let Err(err) = result {
-                if err.is(MESSAGE_MARSHAL_ERROR) && msg.kind == MessageKind::Response {
-                    let resp = msg.as_response();
-                    if let Some(id) = resp.id.as_ref()
-                        && resp.error.is_none()
-                    {
-                        self.logger.errorf(format_args!(
-                            "failed to marshal response for request {id}: {err}"
-                        ));
-                        self.send_error(Some(id), err)?;
-                        continue;
-                    }
-                }
-                return Err(Error::wrap("failed to write message: ", err));
+            self.write_one(&msg)?;
+        }
+    }
+
+    // The write loop's handling of one message (a response that cannot be marshaled is answered with the error).
+    fn write_one(&self, msg: &Message) -> Result<(), Error> {
+        let result = self.w.lock().unwrap().write(msg);
+        let Err(err) = result else {
+            return Ok(());
+        };
+        if err.is(MESSAGE_MARSHAL_ERROR) && msg.kind == MessageKind::Response {
+            let resp = msg.as_response();
+            if let Some(id) = resp.id.as_ref()
+                && resp.error.is_none()
+            {
+                self.logger
+                    .errorf(format_args!("failed to marshal response for request {id}: {err}"));
+                return self.send_error(Some(id), err);
             }
         }
+        Err(Error::wrap("failed to write message: ", err))
     }
 
     // server.go:1053
@@ -1564,6 +1695,9 @@ impl Server {
         }));
 
         self.send(req.message())?;
+        if tsrs_core::INLINE_TASKS {
+            self.read_until_response(ctx, &response_chan)?;
+        }
 
         match response_chan.recv(ctx) {
             Err(err) => Err(err.into()),
@@ -1641,6 +1775,9 @@ impl Server {
     // server.go:1138
     // send writes a message to the outgoing queue, respecting context cancellation.
     pub fn send(&self, msg: Message) -> Result<(), Error> {
+        if tsrs_core::INLINE_TASKS {
+            return self.write_one(&msg);
+        }
         self.outgoing_queue.put(&self.background_ctx(), msg).map_err(Error::from)
     }
 
