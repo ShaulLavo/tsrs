@@ -1,12 +1,14 @@
 // Builds `tsrs-lsp.wasm`: the language server as a single-threaded wasm32-wasip1 command (crates/tsrs_lsp_wasi).
 //   node tools/wasi-lsp/build.ts [--out <file>] [--no-opt]
+// --out also writes <file>.sha256 in sha256sum format, the release's checksum file.
 // Release settings follow tools/wasm/build.sh (opt-level s, fat LTO, panic = abort, wasm-opt -Os, build paths
 // remapped). WASM_OPT names the wasm-opt binary (binaryen 133); --no-opt skips it for fast development builds.
 // Fails when a build path is left in the module or when it imports anything outside wasi_snapshot_preview1.
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 
@@ -65,7 +67,9 @@ console.log(`tsrs-lsp.wasm raw ${bytes.length} gzip -9 ${gzipSync(bytes, { level
 if (values.out) {
   mkdirSync(dirname(resolve(values.out)), { recursive: true });
   copyFileSync(module, values.out);
-  console.log(`wrote ${values.out}`);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  writeFileSync(`${values.out}.sha256`, `${sha256}  ${basename(values.out)}\n`);
+  console.log(`wrote ${values.out} (sha256 ${sha256})`);
 }
 
 // wasm-opt flags for the features rustc enabled (the module's target_features section).
